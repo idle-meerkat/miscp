@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
         }
 
         if (sscanf(speed_str, "%lu", &speed) < 1) {
-                fprintf(stderr, "bad speed: %s", speed_str);
+                fprintf(stderr, "bad speed: %s\n", speed_str);
                 return -1;
         }
 
