@@ -12,7 +12,11 @@
  * TODO add utility which would stream xsetroot from stdin instead of calling
  *      process each time
  * TODO add framebuffer frontend
+ * TODO add suspend/resume listener utility  (kill this utility with CLK_UPDATE)
  * TODO make it deliverable after stop
+ *
+ * TODO add ability to either always fetch time (with more than second precision)
+ *      or make it recoverable after sleep
  */
 #define  _POSIX_C_SOURCE 200809L
 #include <errno.h>
@@ -27,6 +31,9 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t done = 0;
+
+#define MYSIG_CLK_TIMER SIGRTMIN
+#define MYSIG_CLK_UPD SIGRTMIN + 1
 
 static void handler(int sig) {
     (void)sig;
@@ -72,6 +79,24 @@ static uint64_t myprecise_u64(uint64_t d, int src_precision, int dst_precision)
    return d;
 }
 
+#if 0
+static uint64_t mybasicts(uint64_t sec, uint64_t nsec, int precision,
+                          char *buf, size_t bufsz)
+{
+   // uint64_t y, m, d, h, m, s, f;
+
+   // y = (sec / 31536000);
+   // sec %= 31536000;
+
+   // y = (sec / 31536000);
+   // sec %= 31536000;
+   strftime(buf, bufsz, "%c", tmp);
+
+   return d;
+}
+#endif
+
+
 static void fatal(int rc, const char *fmt, ...)
 {
    va_list ap;
@@ -82,7 +107,8 @@ static void fatal(int rc, const char *fmt, ...)
    exit(rc);
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     char buf[124];
     const char *arg;
     int stop, n;
@@ -97,6 +123,8 @@ int main(int argc, char **argv) {
     int precision = 0;
     int flag_zeroes = 0;
     int flag_show_clicks = 0;
+    int flag_show_basic = 0;
+    int flag_handle_sigcont = 0;
     uint64_t click = 0, click_count = 0;
     uint64_t isec = 0, insec = 0;
     uint64_t sec = 0, nsec = 0;
@@ -112,6 +140,12 @@ int main(int argc, char **argv) {
           {
             switch (*arg)
             {
+              case 'b':
+                  flag_show_basic = 1;
+                  break;
+              case 'C':
+                  flag_handle_sigcont = 1;
+                  break;
               case 'c':
                   flag_show_clicks = 1;
                   break;
@@ -173,11 +207,15 @@ int main(int argc, char **argv) {
     sa.sa_handler = handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
-    if (sigaction(SIGRTMIN, &sa, NULL) < 0)
+    if (sigaction(MYSIG_CLK_TIMER, &sa, NULL) < 0)
         fatal(1, "sigaction: %s", strerror(errno));
 
     sigemptyset(&mask);
-    sigaddset(&mask, SIGRTMIN);
+    sigaddset(&mask, MYSIG_CLK_TIMER);
+    /* update clock: */
+    sigaddset(&mask, MYSIG_CLK_UPD);
+    if (flag_handle_sigcont)
+      sigaddset(&mask, SIGCONT);
     if (sigprocmask(SIG_BLOCK, &mask, NULL) < 0)
         fatal(1, "sigprocmask: %s", strerror(errno));
 
@@ -195,10 +233,25 @@ int main(int argc, char **argv) {
         fatal(1, "timer_settime: %s", strerror(errno));
 
     if (flag_absolute)
-      sec += time(NULL);
+      sec += time(0);
 
     do {
         sigwaitinfo(&mask, &si);
+        if ((flag_handle_sigcont && si.si_signo == SIGCONT) ||
+             si.si_signo == MYSIG_CLK_UPD)
+        {
+            /* TODO flag to indicate wheather and how to hanlde sig
+             * cont */
+            if (flag_absolute)
+            {
+              /*
+               * either just replace if aboslute and add if a dedicated flag set
+               * add clicks.
+               */
+              sec = time(0);
+            }
+            continue;
+        }
         ++click;
 
         if (flag_show_clicks)
@@ -220,15 +273,26 @@ int main(int argc, char **argv) {
           }
         }
 
-        n = myitoa_abs_10(sec, buf, -1, 0);
-        if (insec)
+        if (flag_show_basic)
         {
-          buf[n++] = '.';
-          n += myitoa_abs_10(nsec, buf + n, precision, flag_zeroes);
-          if (buf[n - 1] == '.')
-            --n;
+            /* 2023010212200101021... (basic fmt, TODO benchmark strftime and
+             * optionally provide fmt) */
+            struct tm *lt = localtime(&(time_t){sec});
+            // n = mybasicts(sec, nsec, precision, buf, sizeof buf);
+            n = strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", lt);
         }
-
+        else
+        {
+          /* epoch[.subsec] */
+          n = myitoa_abs_10(sec, buf, -1, 0);
+          if (insec)
+          {
+            buf[n++] = '.';
+            n += myitoa_abs_10(nsec, buf + n, precision, flag_zeroes);
+            if (buf[n - 1] == '.')
+              --n;
+          }
+        }
         buf[n++] = '\n';
         mywriteall(1, buf, n);
     } while (click != click_count);
